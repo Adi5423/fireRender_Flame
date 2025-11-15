@@ -99,6 +99,16 @@ Ready for you to add:
   
 ---
 
+---
+
+### 👨‍💻 About the Developer
+
+**Aditya Tiwari**
+- 💼 LinkedIn: [Aditya Tiwari](https://www.linkedin.com/in/adii5423/)
+
+---
+
+
 ### Contributing
 If you would like to contribute to this project, feel free to fork the repository and submit a pull request. Any contributions, suggestions, or improvements are welcome!
 
