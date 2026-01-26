@@ -1,9 +1,9 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
-#include <iostream>
 #include <cmath>
+#include <iostream>
 
-/* ================= MATH ================= */
+/* =================== MATH =================== */
 struct Vec3 { float x,y,z; };
 
 Vec3 operator+(Vec3 a,Vec3 b){ return {a.x+b.x,a.y+b.y,a.z+b.z}; }
@@ -11,18 +11,22 @@ Vec3 operator-(Vec3 a,Vec3 b){ return {a.x-b.x,a.y-b.y,a.z-b.z}; }
 Vec3 operator*(Vec3 a,float s){ return {a.x*s,a.y*s,a.z*s}; }
 
 Vec3 normalize(Vec3 v){
-    float l=sqrt(v.x*v.x+v.y*v.y+v.z*v.z);
+    float l = sqrt(v.x*v.x+v.y*v.y+v.z*v.z);
     return {v.x/l,v.y/l,v.z/l};
 }
 
 Vec3 cross(Vec3 a,Vec3 b){
-    return { a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x };
+    return {
+        a.y*b.z-a.z*b.y,
+        a.z*b.x-a.x*b.z,
+        a.x*b.y-a.y*b.x
+    };
 }
 
-/* ================= CAMERA ================= */
-Vec3 camPos={0,0,5}, camFront={0,0,-1}, camUp={0,1,0};
+/* =================== CAMERA =================== */
+Vec3 camPos={0,0,6}, camFront={0,0,-1}, camUp={0,1,0};
 float yaw=-90,pitch=0;
-bool rmb=false,firstMouse=true;
+bool rmb=false, firstMouse=true;
 float lastX=640,lastY=360;
 
 void mouse(GLFWwindow*,double x,double y){
@@ -34,19 +38,16 @@ void mouse(GLFWwindow*,double x,double y){
 
     dx*=0.1f; dy*=0.1f;
     yaw+=dx; pitch+=dy;
-    if(pitch>89) pitch=89;
-    if(pitch<-89) pitch=-89;
+    pitch = fmaxf(-89,fminf(89,pitch));
 
-    camFront=normalize({
+    camFront = normalize({
         cosf(yaw*0.0174533f)*cosf(pitch*0.0174533f),
         sinf(pitch*0.0174533f),
         sinf(yaw*0.0174533f)*cosf(pitch*0.0174533f)
     });
 }
 
-/* ================= MATRICES ================= */
-void identity(float*m){ for(int i=0;i<16;i++) m[i]=(i%5==0); }
-
+/* =================== MATRICES =================== */
 void perspective(float*m,float f,float a,float n,float fr){
     float t=tanf(f/2);
     for(int i=0;i<16;i++) m[i]=0;
@@ -67,9 +68,10 @@ void lookAt(float*m){
 }
 
 void rotateY(float*m,float a){
-    identity(m);
-    m[0]= cosf(a); m[8]=sinf(a);
-    m[2]=-sinf(a); m[10]=cosf(a);
+    for(int i=0;i<16;i++) m[i]=0;
+    m[0]=cosf(a); m[8]=sinf(a);
+    m[2]=-sinf(a);m[10]=cosf(a);
+    m[5]=1; m[15]=1;
 }
 
 void mul(float*o,float*a,float*b){
@@ -81,20 +83,46 @@ void mul(float*o,float*a,float*b){
         }
 }
 
-/* ================= SHADERS ================= */
-const char* vs=R"(
+/* =================== SHADERS =================== */
+// ---- Mesh ----
+const char* meshVS=R"(
 #version 460 core
 layout(location=0) in vec3 p;
 uniform mat4 MVP;
 void main(){ gl_Position=MVP*vec4(p,1); }
 )";
-const char* fs=R"(
+const char* meshFS=R"(
 #version 460 core
 out vec4 c;
-void main(){ c=vec4(1,0.6,0.2,1); }
+void main(){ c=vec4(1.0,0.6,0.2,1.0); }
 )";
 
-GLuint program(){
+// ---- Background ----
+const char* bgVS=R"(
+#version 460 core
+const vec2 v[3]=vec2[](
+    vec2(-1,-1),
+    vec2( 3,-1),
+    vec2(-1, 3)
+);
+out vec2 uv;
+void main(){
+    gl_Position=vec4(v[gl_VertexID],0,1);
+    uv=gl_Position.xy*0.5+0.5;
+}
+)";
+const char* bgFS=R"(
+#version 460 core
+in vec2 uv;
+out vec4 c;
+void main(){
+    vec3 top=vec3(0.55,0.75,0.95);
+    vec3 bot=vec3(0.0,0.0,0.0);
+    c=vec4(mix(bot,top,clamp(uv.y,0,1)),1);
+}
+)";
+
+GLuint makeProg(const char*vs,const char*fs){
     auto sh=[&](GLenum t,const char*s){
         GLuint x=glCreateShader(t);
         glShaderSource(x,1,&s,0);
@@ -102,60 +130,36 @@ GLuint program(){
         return x;
     };
     GLuint p=glCreateProgram();
-    GLuint v=sh(GL_VERTEX_SHADER,vs), f=sh(GL_FRAGMENT_SHADER,fs);
+    GLuint v=sh(GL_VERTEX_SHADER,vs);
+    GLuint f=sh(GL_FRAGMENT_SHADER,fs);
     glAttachShader(p,v); glAttachShader(p,f);
     glLinkProgram(p);
     glDeleteShader(v); glDeleteShader(f);
     return p;
 }
 
-/* ================= MAIN ================= */
+/* =================== MAIN =================== */
 int main(){
     glfwInit();
-    GLFWwindow*w=glfwCreateWindow(1280,720,"REAL 3D Triangle (Solid)",0,0);
+    GLFWwindow*w=glfwCreateWindow(1280,720,"Solid 3D Triangle + Sky Void",0,0);
     glfwMakeContextCurrent(w);
     gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
     glfwSetCursorPosCallback(w,mouse);
     glEnable(GL_DEPTH_TEST);
 
-    // 🔺 TRIANGULAR PRISM (REAL VOLUME)
-    float tri3D[] = {
-        // Front face
-        -0.7f,-0.5f, 0.3f,
-         0.7f,-0.5f, 0.3f,
-         0.0f, 0.8f, 0.3f,
+    // ---- Triangular Prism (SOLID) ----
+    float mesh[]={
+        -0.7f,-0.5f, 0.4f,  0.7f,-0.5f, 0.4f,  0.0f,0.8f, 0.4f,
+        -0.7f,-0.5f,-0.4f,  0.0f,0.8f,-0.4f,  0.7f,-0.5f,-0.4f,
 
-        // Back face
-        -0.7f,-0.5f,-0.3f,
-         0.0f, 0.8f,-0.3f,
-         0.7f,-0.5f,-0.3f,
+        -0.7f,-0.5f, 0.4f, -0.7f,-0.5f,-0.4f,  0.0f,0.8f,-0.4f,
+        -0.7f,-0.5f, 0.4f,  0.0f,0.8f,-0.4f,   0.0f,0.8f,0.4f,
 
-        // Side 1
-        -0.7f,-0.5f, 0.3f,
-        -0.7f,-0.5f,-0.3f,
-         0.0f, 0.8f,-0.3f,
+         0.7f,-0.5f, 0.4f,  0.0f,0.8f,0.4f,    0.0f,0.8f,-0.4f,
+         0.7f,-0.5f, 0.4f,  0.0f,0.8f,-0.4f,   0.7f,-0.5f,-0.4f,
 
-        -0.7f,-0.5f, 0.3f,
-         0.0f, 0.8f,-0.3f,
-         0.0f, 0.8f, 0.3f,
-
-        // Side 2
-         0.7f,-0.5f, 0.3f,
-         0.0f, 0.8f, 0.3f,
-         0.0f, 0.8f,-0.3f,
-
-         0.7f,-0.5f, 0.3f,
-         0.0f, 0.8f,-0.3f,
-         0.7f,-0.5f,-0.3f,
-
-        // Bottom
-        -0.7f,-0.5f, 0.3f,
-         0.7f,-0.5f,-0.3f,
-        -0.7f,-0.5f,-0.3f,
-
-        -0.7f,-0.5f, 0.3f,
-         0.7f,-0.5f, 0.3f,
-         0.7f,-0.5f,-0.3f
+        -0.7f,-0.5f, 0.4f,  0.7f,-0.5f,-0.4f, -0.7f,-0.5f,-0.4f,
+        -0.7f,-0.5f, 0.4f,  0.7f,-0.5f,0.4f,   0.7f,-0.5f,-0.4f
     };
 
     GLuint VAO,VBO;
@@ -163,47 +167,51 @@ int main(){
     glGenBuffers(1,&VBO);
     glBindVertexArray(VAO);
     glBindBuffer(GL_ARRAY_BUFFER,VBO);
-    glBufferData(GL_ARRAY_BUFFER,sizeof(tri3D),tri3D,GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,sizeof(mesh),mesh,GL_STATIC_DRAW);
     glVertexAttribPointer(0,3,GL_FLOAT,0,0,0);
     glEnableVertexAttribArray(0);
 
-    GLuint prog=program();
-    GLint mvpLoc=glGetUniformLocation(prog,"MVP");
+    GLuint meshProg = makeProg(meshVS,meshFS);
+    GLuint bgProg   = makeProg(bgVS,bgFS);
+    GLint mvpLoc = glGetUniformLocation(meshProg,"MVP");
 
     float P[16],V[16],M[16],PV[16],MVP[16];
-    double last=glfwGetTime();
-    float angle=0;
+    double last=glfwGetTime(); float ang=0;
 
     while(!glfwWindowShouldClose(w)){
         double now=glfwGetTime();
-        float dt=now-last; last=now;
-        angle+=dt;
+        float dt=now-last; last=now; ang+=dt;
 
         rmb=glfwGetMouseButton(w,GLFW_MOUSE_BUTTON_RIGHT)==GLFW_PRESS;
         glfwSetInputMode(w,GLFW_CURSOR,rmb?GLFW_CURSOR_DISABLED:GLFW_CURSOR_NORMAL);
 
-        float s=dt*3*(glfwGetKey(w,GLFW_KEY_LEFT_SHIFT)?3:1);
+        float sp=dt*3*(glfwGetKey(w,GLFW_KEY_LEFT_SHIFT)?3:1);
         Vec3 right=normalize(cross(camFront,camUp));
         if(rmb){
-            if(glfwGetKey(w,GLFW_KEY_W)) camPos=camPos+camFront*s;
-            if(glfwGetKey(w,GLFW_KEY_S)) camPos=camPos-camFront*s;
-            if(glfwGetKey(w,GLFW_KEY_A)) camPos=camPos-right*s;
-            if(glfwGetKey(w,GLFW_KEY_D)) camPos=camPos+right*s;
-            if(glfwGetKey(w,GLFW_KEY_Q)) camPos.y-=s;
-            if(glfwGetKey(w,GLFW_KEY_E)) camPos.y+=s;
+            if(glfwGetKey(w,GLFW_KEY_W)) camPos=camPos+camFront*sp;
+            if(glfwGetKey(w,GLFW_KEY_S)) camPos=camPos-camFront*sp;
+            if(glfwGetKey(w,GLFW_KEY_A)) camPos=camPos-right*sp;
+            if(glfwGetKey(w,GLFW_KEY_D)) camPos=camPos+right*sp;
+            if(glfwGetKey(w,GLFW_KEY_Q)) camPos.y-=sp;
+            if(glfwGetKey(w,GLFW_KEY_E)) camPos.y+=sp;
         }
+
+        // ---- Background ----
+        glDisable(GL_DEPTH_TEST);
+        glUseProgram(bgProg);
+        glDrawArrays(GL_TRIANGLES,0,3);
+
+        // ---- 3D Mesh ----
+        glEnable(GL_DEPTH_TEST);
+        glClear(GL_DEPTH_BUFFER_BIT);
 
         perspective(P,45*0.0174533f,1280.f/720.f,0.1f,100);
         lookAt(V);
-        rotateY(M,angle);
-
+        rotateY(M,ang);
         mul(PV,P,V);
         mul(MVP,PV,M);
 
-        glClearColor(0.05f,0.06f,0.08f,1);
-        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
-
-        glUseProgram(prog);
+        glUseProgram(meshProg);
         glUniformMatrix4fv(mvpLoc,1,GL_FALSE,MVP);
         glBindVertexArray(VAO);
         glDrawArrays(GL_TRIANGLES,0,36);
