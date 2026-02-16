@@ -2,6 +2,7 @@
 # Visual Studio
 
 .vs/
+.vscode/
 
 *.suo
 
