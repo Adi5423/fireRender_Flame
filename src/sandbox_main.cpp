@@ -62,7 +62,6 @@ uniform float iFormation;  // 0..1 formation progress
 
 // ---- Noise functions (GPU side) ----
 
-// Hash function for noise
 vec3 hash33(vec3 p) {
     p = vec3(dot(p, vec3(127.1, 311.7, 74.7)),
              dot(p, vec3(269.5, 183.3, 246.1)),
@@ -70,7 +69,6 @@ vec3 hash33(vec3 p) {
     return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
 }
 
-// 3D value noise
 float noise3D(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
@@ -86,7 +84,6 @@ float noise3D(vec3 p) {
                        dot(hash33(i + vec3(1,1,1)), f - vec3(1,1,1)), u.x), u.y), u.z);
 }
 
-// Fractional Brownian Motion - multi-octave noise
 float fbm(vec3 p, int octaves) {
     float value = 0.0;
     float amplitude = 0.5;
@@ -99,266 +96,289 @@ float fbm(vec3 p, int octaves) {
     return value;
 }
 
-// ---- Flame SDF & density ----
+// ---- Flame shape ----
+// Lighter / candle flame teardrop profile
+// Reference: a pocket lighter flame is narrow at the gas nozzle,
+// widens rapidly through the combustion zone reaching max width
+// around 30-40% up, then tapers smoothly to a flickering tip.
 
-// Flame body: teardrop / elongated cone shape
-// The flame is centered at origin, extends upward along Y
+float flameRadius(float h) {
+    // h is normalized height [0..1] from base to tip
+    // baseWidth controls the maximum width of the flame
+    float baseWidth = 0.13;
+    
+    // 1. Quick rise from narrow nozzle at base
+    //    Using 1-exp(-k*h) for fast initial widening
+    float rise = 1.0 - exp(-h * 12.0);
+    
+    // 2. Smooth taper toward tip
+    //    pow(1-h, p) controls how quickly it narrows
+    float taper = pow(1.0 - h, 1.1);
+    
+    // 3. Slight bulge / widening in the combustion zone (h ~ 0.25-0.4)
+    //    This is where the flame is widest
+    float bulge = 1.0 + 0.3 * exp(-pow((h - 0.3) / 0.15, 2.0));
+    
+    return baseWidth * rise * taper * bulge;
+}
+
 float flameSDF(vec3 p) {
-    // Flame base at y=0, tip around y=flameHeight
-    float flameHeight = 1.8;
+    float flameHeight = 2.0;
+    float h = p.y / flameHeight;
     
-    // Normalize height [0..1]
-    float h = clamp(p.y / flameHeight, 0.0, 1.0);
+    // Below base or above tip: outside
+    if(h < 0.0 || h > 1.0) {
+        // Return large positive value (outside)
+        float radialDist = length(p.xz);
+        return radialDist + abs(h) * 0.5;
+    }
     
-    // Radius profile: wide at base, narrow at tip
-    // Uses a smooth curve: wider at bottom, tapers to point
-    float baseRadius = 0.18;
-    
-    // Teardrop profile: r(h) = baseRadius * (1-h)^power * sqrt(1 + h*widening)
-    // This creates the characteristic flame shape:
-    //  - wide and round at bottom
-    //  - narrows smoothly toward top
-    //  - slight bulge in middle (combustion zone)
-    float taper = pow(1.0 - h, 1.3);
-    float bulge = 1.0 + 0.4 * h * (1.0 - h) * 4.0; // bulge peaks at h=0.5
-    float radius = baseRadius * taper * bulge;
-    
-    // Radial distance in XZ plane
+    float radius = flameRadius(h);
     float radialDist = length(p.xz);
     
-    // SDF: negative inside, positive outside
     return radialDist - radius;
 }
 
-// Compute flame density at a point
-// This combines the SDF shape with noise-based turbulence
+// Flame density with turbulence
 float flameDensity(vec3 p, float time) {
-    float flameHeight = 1.8;
+    float flameHeight = 2.0;
     float h = p.y / flameHeight;
     
-    // Outside vertical range = no flame
-    if(h < -0.05 || h > 1.1) return 0.0;
+    // Quick reject outside vertical range
+    if(h < -0.02 || h > 1.05) return 0.0;
     
-    // --- Turbulence displacement ---
-    // Fire rises, so noise scrolls upward over time
-    // This creates the characteristic upward-licking motion
+    // --- Turbulence ---
+    // Noise scrolls upward (simulating rising hot gas)
     vec3 noisePos = p;
-    noisePos.y -= time * 1.5;  // scroll noise upward (flame rises)
+    noisePos.y -= time * 1.8;
     
-    // Multi-scale turbulence
-    // Large scale: overall flame sway
-    float largeTurb = fbm(noisePos * 2.0 + vec3(0, time*0.3, 0), 3) * 0.12;
-    // Medium scale: individual tongue motion
-    float medTurb = fbm(noisePos * 5.0 + vec3(time*0.5, 0, time*0.3), 3) * 0.06;
-    // Fine scale: small flickering details
-    float fineTurb = fbm(noisePos * 12.0 + vec3(0, time*0.8, 0), 2) * 0.02;
+    // Turbulence amplitude increases with height
+    // Base is stable, tip flickers wildly — this is physically correct:
+    // the base is stabilized by the gas jet, the tip is in free convection
+    float turbAmp = smoothstep(0.0, 0.5, h) * 0.8 + 0.1;
     
-    // Turbulence increases with height (tip flickers more than base)
-    float turbScale = 0.3 + h * 1.5;
+    // Large-scale sway (whole flame gently rocking)
+    float sway = fbm(vec3(0.0, time * 0.4, 0.0), 2) * 0.03;
     
-    // Displace the sample point
+    // Medium turbulence (flame tongue motion)
+    float turbX = fbm(noisePos * 3.0 + vec3(0, time * 0.5, 0), 3) * 0.08 * turbAmp;
+    float turbZ = fbm(noisePos * 3.0 + vec3(50.0, time * 0.5, 30.0), 3) * 0.06 * turbAmp;
+    
+    // Fine flickering (high-frequency detail at the tip)
+    float fineX = fbm(noisePos * 10.0 + vec3(0, time * 1.5, 0), 2) * 0.025 * turbAmp;
+    float fineZ = fbm(noisePos * 10.0 + vec3(70.0, time * 1.5, 40.0), 2) * 0.02 * turbAmp;
+    
+    // Apply displacement
     vec3 displaced = p;
-    displaced.x += (largeTurb + medTurb + fineTurb) * turbScale;
-    displaced.z += (largeTurb - medTurb + fineTurb * 0.5) * turbScale * 0.7;
+    displaced.x += sway + turbX + fineX;
+    displaced.z += turbZ + fineZ;
     
-    // Evaluate SDF at displaced position
+    // Evaluate SDF
     float sdf = flameSDF(displaced);
     
-    // Convert SDF to density (smooth falloff)
-    // Negative SDF = inside flame = positive density
-    float density = 1.0 - smoothstep(-0.06, 0.04, sdf);
+    // Convert SDF to smooth density
+    // Wider transition band for softer edges (more realistic)
+    float density = 1.0 - smoothstep(-0.04, 0.03, sdf);
     
-    // Modulate density with noise for internal structure
-    float internalNoise = fbm(noisePos * 8.0 + vec3(0, time * 2.0, 0), 3);
-    density *= 0.6 + 0.4 * (0.5 + 0.5 * internalNoise);
+    // Internal density variation (the flame isn't uniform inside)
+    float internalNoise = fbm(noisePos * 6.0 + vec3(0, time * 2.5, 0), 3);
+    density *= 0.7 + 0.3 * (0.5 + 0.5 * internalNoise);
     
-    // Fade density at bottom (flame doesn't start abruptly)
-    float bottomFade = smoothstep(-0.02, 0.08, p.y);
-    density *= bottomFade;
+    // Smooth fade at the very base (flame emerges from nozzle)
+    float baseFade = smoothstep(0.0, 0.06, h);
+    density *= baseFade;
     
-    // Fade at top (flame dissolves)
-    float topFade = 1.0 - smoothstep(0.7, 1.0, h);
-    density *= topFade;
+    // Dissolve at tip
+    float tipFade = 1.0 - smoothstep(0.8, 1.0, h);
+    density *= tipFade;
     
-    // Formation: scale density by formation progress
+    // Formation animation
     density *= iFormation;
     
     return max(density, 0.0);
 }
 
-// ---- Temperature & Color ----
+// ---- Temperature ----
+// Temperature field determines both color and brightness
+// Physically: hottest at base center (combustion zone), cools as gas rises
 
-// Compute temperature based on position within flame
-// Returns 0..1 where 1 = hottest (blue/white core), 0 = coolest (dark tips)
 float getTemperature(vec3 p, float density, float time) {
-    float flameHeight = 1.8;
+    float flameHeight = 2.0;
     float h = clamp(p.y / flameHeight, 0.0, 1.0);
     float radial = length(p.xz);
     
-    // Temperature is highest at the core center, near the base
-    // and decreases with:
-    //  1. Height (convective cooling as gases rise)
-    //  2. Radial distance (cooler at edges)
+    // Height-based cooling (convective heat loss as gas rises)
+    // The bottom 30% stays very hot, then cools gradually
+    float heightTemp = 1.0 - pow(h, 0.6);
     
-    // Height-based cooling: hottest at bottom, coolest at top
-    float heightTemp = 1.0 - pow(h, 0.7);
+    // Radial cooling (center axis is hottest, edges are coolest)
+    float maxR = flameRadius(h) + 0.01;
+    float radialTemp = 1.0 - smoothstep(0.0, maxR * 0.8, radial);
     
-    // Radial cooling: hottest at center axis
-    float maxR = 0.18 * (1.0 - h * 0.5);
-    float radialTemp = 1.0 - smoothstep(0.0, maxR, radial);
+    // Combined temperature
+    float temp = heightTemp * mix(0.35, 1.0, radialTemp);
     
-    // Core temperature
-    float temp = heightTemp * (0.4 + 0.6 * radialTemp);
-    
-    // Blue zone: very base of flame (h < 0.15), inner region
-    // In real candles, the blue cone is where complete combustion occurs
-    // (methane + O2 → CO2 + H2O, emitting blue light from CH radicals)
-    
-    // Add slight noise variation for flickering temperature
+    // Noise variation for flickering temperature
     vec3 noiseP = p;
-    noiseP.y -= time * 1.2;
-    float tempNoise = fbm(noiseP * 6.0, 2) * 0.15;
+    noiseP.y -= time * 1.5;
+    float tempNoise = fbm(noiseP * 5.0, 2) * 0.12;
     temp += tempNoise;
     
     return clamp(temp * density, 0.0, 1.0);
 }
 
-// Blackbody-inspired flame coloring
-// Maps temperature to realistic flame colors
-vec3 flameColor(float temp, float height, float radial) {
-    // Real candle flame color zones (from reference image):
-    //  Bottom:  Blue (CH radical emission, ~1400°C)
-    //  Lower:   Blue-white transition
-    //  Core:    Bright yellow-white (incandescent soot, ~1200°C)  
-    //  Middle:  Yellow-orange
-    //  Upper:   Orange-red (cooling soot)
-    //  Tip:     Dark red/transparent (dissipating heat)
+// ---- Color mapping ----
+// Maps temperature + height to realistic flame colors
+// Reference: lighter flame from the image has:
+//   - Blue-violet at very base (premixed combustion zone, CH radical emission)
+//   - Bright white-yellow in inner core just above blue
+//   - Rich orange on outer body
+//   - Dark orange-red at outer edges and tip
+
+vec3 flameColor(float temp, float h, float radial) {
     
+    // --- Blue base zone ---
+    // The blue zone is at the very bottom of the flame where
+    // premixed combustion occurs (gas + air mix before burning)
+    float blueZone = smoothstep(0.15, 0.0, h) * smoothstep(0.3, 0.6, temp);
+    
+    // Blue colors (from deep blue to light blue-white)
+    vec3 deepBlue = vec3(0.05, 0.15, 0.7);
+    vec3 lightBlue = vec3(0.3, 0.5, 0.95);
+    vec3 blueCol = mix(deepBlue, lightBlue, temp);
+    
+    // --- Hot core zone ---
+    // Just above blue zone, the inner core is white-hot
+    // Bright yellow-white from incandescent soot particles
+    vec3 whiteHot = vec3(1.0, 0.95, 0.85);
+    vec3 brightYellow = vec3(1.0, 0.88, 0.45);
+    
+    // --- Main body colors ---
+    // Orange zone (majority of visible flame)
+    vec3 deepOrange = vec3(1.0, 0.45, 0.0);
+    vec3 golden = vec3(1.0, 0.7, 0.15);
+    
+    // --- Outer / tip colors ---
+    vec3 darkOrange = vec3(0.85, 0.25, 0.0);
+    vec3 darkRed = vec3(0.5, 0.08, 0.0);
+    vec3 smoke = vec3(0.15, 0.03, 0.0);
+    
+    // Build color based on temperature
     vec3 color;
+    if(temp > 0.85) {
+        // White-hot core
+        color = mix(brightYellow, whiteHot, (temp - 0.85) / 0.15);
+    } else if(temp > 0.65) {
+        // Bright yellow
+        color = mix(golden, brightYellow, (temp - 0.65) / 0.2);
+    } else if(temp > 0.45) {
+        // Golden to yellow
+        color = mix(deepOrange, golden, (temp - 0.45) / 0.2);
+    } else if(temp > 0.25) {
+        // Orange
+        color = mix(darkOrange, deepOrange, (temp - 0.25) / 0.2);
+    } else if(temp > 0.1) {
+        // Dark orange to dark red  
+        color = mix(darkRed, darkOrange, (temp - 0.1) / 0.15);
+    } else {
+        // Smoke / nearly invisible
+        color = mix(smoke, darkRed, temp / 0.1);
+    }
     
-    // Blue base zone
-    if(height < 0.2 && temp > 0.5) {
-        float blueStrength = (1.0 - height / 0.2) * smoothstep(0.5, 0.8, temp);
-        vec3 blueColor = mix(vec3(0.1, 0.3, 0.9), vec3(0.4, 0.6, 1.0), temp);
-        vec3 hotColor = mix(vec3(1.0, 0.7, 0.2), vec3(1.0, 0.95, 0.8), (temp - 0.5) * 2.0);
-        color = mix(hotColor, blueColor, blueStrength * 0.6);
-    }
-    // Hot core (bright yellow-white)
-    else if(temp > 0.75) {
-        color = mix(vec3(1.0, 0.85, 0.3), vec3(1.0, 0.97, 0.85), (temp - 0.75) * 4.0);
-    }
-    // Mid flame (yellow-orange)
-    else if(temp > 0.5) {
-        color = mix(vec3(1.0, 0.55, 0.05), vec3(1.0, 0.85, 0.3), (temp - 0.5) * 4.0);
-    }
-    // Cooler regions (orange-red)
-    else if(temp > 0.25) {
-        color = mix(vec3(0.8, 0.2, 0.0), vec3(1.0, 0.55, 0.05), (temp - 0.25) * 4.0);
-    }
-    // Cooling edges (dark red)
-    else if(temp > 0.1) {
-        color = mix(vec3(0.3, 0.05, 0.0), vec3(0.8, 0.2, 0.0), (temp - 0.1) * 6.67);
-    }
-    // Nearly extinguished
-    else {
-        color = vec3(0.15, 0.02, 0.0) * temp * 10.0;
-    }
+    // Blend in blue at the base
+    color = mix(color, blueCol, blueZone);
     
     return color;
 }
 
-// ---- Raymarching ----
-
-// Intersect ray with flame bounding volume (cylinder)
-// Returns (tNear, tFar) or (-1,-1) if no hit
-vec2 intersectFlameVolume(vec3 ro, vec3 rd) {
-    // Bounding cylinder: radius=0.5, height=[−0.1, 2.0]
-    float cylRadius = 0.5;
-    float yMin = -0.1;
-    float yMax = 2.0;
-    
-    // Intersect with infinite cylinder (XZ plane)
-    float a = rd.x * rd.x + rd.z * rd.z;
-    float b = 2.0 * (ro.x * rd.x + ro.z * rd.z);
-    float c = ro.x * ro.x + ro.z * ro.z - cylRadius * cylRadius;
-    
-    float disc = b * b - 4.0 * a * c;
+// ---- Ray-Sphere intersection for bounding volume ----
+vec2 intersectSphere(vec3 ro, vec3 rd, vec3 center, float radius) {
+    vec3 oc = ro - center;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - radius * radius;
+    float disc = b * b - c;
     if(disc < 0.0) return vec2(-1.0);
-    
     float sqrtDisc = sqrt(disc);
-    float t0 = (-b - sqrtDisc) / (2.0 * a);
-    float t1 = (-b + sqrtDisc) / (2.0 * a);
-    
-    // Clip to Y planes
-    float tYMin0 = (yMin - ro.y) / rd.y;
-    float tYMax0 = (yMax - ro.y) / rd.y;
-    if(tYMin0 > tYMax0) { float tmp = tYMin0; tYMin0 = tYMax0; tYMax0 = tmp; }
-    
-    float tNear = max(t0, tYMin0);
-    float tFar = min(t1, tYMax0);
-    
-    tNear = max(tNear, 0.0);
-    
-    if(tNear > tFar) return vec2(-1.0);
-    return vec2(tNear, tFar);
+    return vec2(-b - sqrtDisc, -b + sqrtDisc);
 }
 
+// ---- Main ----
 void main() {
     // Build camera ray
     vec3 forward = normalize(iCamFront);
     vec3 right = normalize(cross(forward, iCamUp));
     vec3 up = cross(right, forward);
     
-    // Ray direction from UV coordinates
     vec3 rd = normalize(forward + uv.x * iAspect * 0.5 * right + uv.y * 0.5 * up);
     vec3 ro = iCamPos;
     
-    // Dark background
-    vec3 bgColor = vec3(0.01, 0.01, 0.015);
+    // Pure black background
+    vec3 bgColor = vec3(0.005, 0.005, 0.008);
     
-    // Intersect with flame bounding volume
-    vec2 tRange = intersectFlameVolume(ro, rd);
+    // Bounding sphere centered on the flame body
+    // Flame extends from y=0 to y=2.0, center ~ (0, 1.0, 0), radius ~ 1.2
+    vec3 sphereCenter = vec3(0.0, 1.0, 0.0);
+    float sphereRadius = 1.3;
+    vec2 tRange = intersectSphere(ro, rd, sphereCenter, sphereRadius);
     
+    // Compute glow for ALL pixels (prevents visible bounding volume edge)
+    // Project flame center onto ray to find closest approach
+    vec3 toCenter = sphereCenter - ro;
+    float tClosest = dot(toCenter, rd);
+    vec3 closestPoint = ro + rd * max(tClosest, 0.0);
+    float distToAxis = length(closestPoint.xz);  // distance to flame central axis
+    float distToCenter = length(closestPoint - sphereCenter);
+    
+    // Warm ambient glow: soft halo around flame visible from distance
+    float glowFalloff = exp(-distToCenter * distToCenter * 1.5);
+    float axisGlow = exp(-distToAxis * distToAxis * 8.0);
+    float glow = (glowFalloff * 0.04 + axisGlow * 0.02) * iFormation;
+    vec3 warmGlow = vec3(1.0, 0.5, 0.1) * glow;
+    
+    // If ray misses bounding volume, just show background + glow
     if(tRange.x < 0.0) {
-        fragColor = vec4(bgColor, 1.0);
+        vec3 finalColor = bgColor + warmGlow;
+        finalColor = finalColor / (finalColor + vec3(1.0));
+        finalColor = pow(finalColor, vec3(1.0 / 2.2));
+        fragColor = vec4(finalColor, 1.0);
         return;
     }
     
-    // Raymarching parameters
-    int maxSteps = 64;
-    float stepSize = (tRange.y - tRange.x) / float(maxSteps);
-    stepSize = max(stepSize, 0.01);
+    // Clamp to positive (in front of camera)
+    tRange.x = max(tRange.x, 0.0);
     
-    // Accumulation
+    // Raymarching
+    int maxSteps = 80;
+    float totalDist = tRange.y - tRange.x;
+    float stepSize = totalDist / float(maxSteps);
+    stepSize = max(stepSize, 0.008);
+    
     vec3 accColor = vec3(0.0);
     float accAlpha = 0.0;
-    
     float t = tRange.x;
     
     for(int i = 0; i < maxSteps; i++) {
-        if(accAlpha > 0.95) break;  // Early exit when opaque enough
+        if(accAlpha > 0.97) break;
         
         vec3 p = ro + rd * t;
         
-        // Sample flame density
         float density = flameDensity(p, iTime);
         
         if(density > 0.001) {
-            // Get temperature at this point
-            float height = clamp(p.y / 1.8, 0.0, 1.0);
+            float h = clamp(p.y / 2.0, 0.0, 1.0);
             float radial = length(p.xz);
             float temp = getTemperature(p, density, iTime);
             
-            // Get flame color from temperature
-            vec3 col = flameColor(temp, height, radial);
+            vec3 col = flameColor(temp, h, radial);
             
-            // Emission intensity (hot regions glow brighter)
-            float emission = temp * temp * 3.0;
+            // Emission: hotter regions emit more light
+            // Using a curve that makes the core really bright
+            float emission = pow(temp, 1.5) * 3.5;
             col *= emission;
             
-            // Beer-Lambert absorption
-            float alpha = density * stepSize * 12.0;
-            alpha = min(alpha, 0.3);  // Cap per-step contribution
+            // Absorption / opacity per step
+            float alpha = density * stepSize * 15.0;
+            alpha = min(alpha, 0.25);
             
             // Front-to-back compositing
             accColor += col * alpha * (1.0 - accAlpha);
@@ -369,20 +389,13 @@ void main() {
         if(t > tRange.y) break;
     }
     
-    // Add subtle glow around flame (scattering approximation)
-    // Sample density at a few points near the center for glow
-    vec3 glowCenter = vec3(0.0, 0.6, 0.0);
-    float distToFlameAxis = length(ro + rd * max(tRange.x, 0.0) - glowCenter);
-    float glow = exp(-distToFlameAxis * distToFlameAxis * 2.0) * 0.08 * iFormation;
-    vec3 glowColor = vec3(1.0, 0.6, 0.15) * glow;
+    // Final composite: background + flame + glow
+    vec3 finalColor = bgColor * (1.0 - accAlpha) + accColor + warmGlow;
     
-    // Final composite
-    vec3 finalColor = bgColor * (1.0 - accAlpha) + accColor + glowColor;
-    
-    // Tone mapping (simple Reinhard)
+    // Tone mapping (Reinhard)
     finalColor = finalColor / (finalColor + vec3(1.0));
     
-    // Slight gamma correction
+    // Gamma correction
     finalColor = pow(finalColor, vec3(1.0 / 2.2));
     
     fragColor = vec4(finalColor, 1.0);
