@@ -26,7 +26,7 @@ include_directories(vendor/glm)
 include_directories(vendor/stb)
 
 # ---- App ----
-add_executable(Sandbox src/sandbox_main.cpp src/noise.cpp)
+add_executable(Sandbox src/sandbox_main.cpp)
 
 target_link_libraries(Sandbox PRIVATE glad glfw ${CMAKE_DL_LIBS})
 
