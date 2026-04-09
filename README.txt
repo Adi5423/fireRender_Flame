@@ -9,6 +9,9 @@ FEATURES:
 - Realistic Formation Animation (watch flame gradually form!)
 
 HOW TO RUN:
+cmake -S . -B build 
+cmake --build build
+
 To start the simulation, run this command in your terminal:
 .\build\Sandbox.exe
 
